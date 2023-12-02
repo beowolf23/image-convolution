@@ -73,7 +73,7 @@ make run_openmp
 This command will execute the OpenMP version with the default input image (inputs/leaf.ppm) and store the result in outputs/out_openmp.ppm.
 
 Pthreads
- - make run_pthreads
+make run_pthreads
 This command will execute the Pthreads version with the default input image and store the result in outputs/out_pthreads.ppm.
 
 MPI
