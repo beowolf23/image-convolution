@@ -2,8 +2,9 @@
 #include <mpi/mpi.h>
 #include <stdio.h>
 
-#define filterWidth 3
-#define filterHeigth 3
+#define filterWidth 9
+#define filterHeigth 9
+
 #define max(a, b)                                                              \
   ({                                                                           \
     __typeof__(a) _a = (a);                                                    \
@@ -17,11 +18,15 @@
     _a < _b ? _a : _b;                                                         \
   })
 
-double factor = 1.0; // used for scaling the colors
-double bias = 0;     // used for adding brightness
+double filter[filterHeigth][filterWidth] = {
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+};
 
-double filter[filterWidth][filterHeigth] = {
-    {0, 0.2, 0}, {0.2, 0.2, 0.2}, {0, 0.2, 0}};
+double factor = 1.0 / 9.0;
+double bias = 0.0;
 
 ppm_image *apply_filter_local(ppm_pixel *local_data, int width, int heigth) {
   ppm_image *local_result = (ppm_image *)malloc(sizeof(ppm_image));
@@ -59,6 +64,31 @@ ppm_image *apply_filter_local(ppm_pixel *local_data, int width, int heigth) {
   return local_result;
 }
 
+void exchange_boundary_rows(ppm_pixel *local_data, int width,
+                            int rows_per_process, int rank, int size) {
+  if (size > 1) {
+    if (rank < size - 1) {
+      // Send the last row to the next process
+      MPI_Send(local_data + (rows_per_process - 1) * width, width * 3,
+               MPI_UNSIGNED_CHAR, rank + 1, 0, MPI_COMM_WORLD);
+    }
+    if (rank > 0) {
+      // Receive the last row from the previous process
+      MPI_Recv(local_data - width, width * 3, MPI_UNSIGNED_CHAR, rank - 1, 0,
+               MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      // Send the first row to the previous process
+      MPI_Send(local_data, width * 3, MPI_UNSIGNED_CHAR, rank - 1, 0,
+               MPI_COMM_WORLD);
+    }
+    if (rank < size - 1) {
+      // Receive the first row from the next process
+      MPI_Recv(local_data + rows_per_process * width, width * 3,
+               MPI_UNSIGNED_CHAR, rank + 1, 0, MPI_COMM_WORLD,
+               MPI_STATUS_IGNORE);
+    }
+  }
+}
+
 int main(int argc, char **argv) {
 
   MPI_Init(&argc, &argv);
@@ -83,6 +113,7 @@ int main(int argc, char **argv) {
     image = read_ppm(argv[1]);
   } else {
     image = (ppm_image *)malloc(sizeof(ppm_image));
+    image->data = NULL;
   }
 
   // Broadcast the image dimensions to all processes
@@ -96,21 +127,27 @@ int main(int argc, char **argv) {
       (rank == size - 1) ? image->heigth : start_row + rows_per_process;
 
   // Allocate memory for the local image data
-  ppm_pixel *local_data = (ppm_pixel *)malloc(
-      image->width * (end_row - start_row) * sizeof(ppm_pixel));
+  ppm_pixel *local_data = (ppm_pixel *)malloc((rows_per_process + 2) *
+                                              image->width * sizeof(ppm_pixel));
 
   // Scatter the image data to all processes
-  MPI_Scatter(image->data, image->width * rows_per_process, MPI_UNSIGNED_CHAR,
-              local_data, image->width * rows_per_process, MPI_UNSIGNED_CHAR, 0,
+  MPI_Scatter(image->data, image->width * rows_per_process * 3,
+              MPI_UNSIGNED_CHAR, local_data + image->width,
+              image->width * rows_per_process * 3, MPI_UNSIGNED_CHAR, 0,
               MPI_COMM_WORLD);
+
+  // Exchange boundary rows
+  exchange_boundary_rows(local_data + image->width, image->width,
+                         rows_per_process, rank, size);
 
   // Process local image data
   ppm_image *local_result =
-      apply_filter_local(local_data, image->width, rows_per_process);
+      apply_filter_local(local_data, image->width, rows_per_process + 2);
 
   // Gather the results to process 0
-  MPI_Gather(local_result->data, image->width * rows_per_process,
-             MPI_UNSIGNED_CHAR, image->data, image->width * rows_per_process,
+  MPI_Gather(local_result->data + image->width,
+             image->width * rows_per_process * 3, MPI_UNSIGNED_CHAR,
+             image->data, image->width * rows_per_process * 3,
              MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
 
   // Process 0 writes the final result
